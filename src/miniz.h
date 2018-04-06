@@ -28,7 +28,7 @@
        - Added example6.c, which dumps an image of the mandelbrot set to a PNG file.
        - Modified example2 to help test the MZ_ZIP_FLAG_DO_NOT_SORT_CENTRAL_DIRECTORY flag more.
        - In r3: Bugfix to mz_zip_writer_add_file() found during merge: Fix possible src file fclose() leak if alignment bytes+local header file write faiiled
-﻿  ﻿   - In r4: Minor bugfix to mz_zip_writer_add_from_zip_reader(): Was pushing the wrong central dir header offset, appears harmless in this release, but it became a problem in the zip64 branch
+   - In r4: Minor bugfix to mz_zip_writer_add_from_zip_reader(): Was pushing the wrong central dir header offset, appears harmless in this release, but it became a problem in the zip64 branch
      5/20/12 v1.14 - MinGW32/64 GCC 4.6.1 compiler fixes: added MZ_FORCEINLINE, #include <time.h> (thanks fermtect).
      5/19/12 v1.13 - From jason@cornsyrup.org and kelwert@mtu.edu - Fix mz_crc32() so it doesn't compute the wrong CRC-32's when mz_ulong is 64-bit.
        - Temporarily/locally slammed in "typedef unsigned long mz_ulong" and re-ran a randomized regression test on ~500k files.
@@ -1954,8 +1954,8 @@ static void tdefl_start_dynamic_block(tdefl_compressor *d)
   for (num_lit_codes = 286; num_lit_codes > 257; num_lit_codes--) if (d->m_huff_code_sizes[0][num_lit_codes - 1]) break;
   for (num_dist_codes = 30; num_dist_codes > 1; num_dist_codes--) if (d->m_huff_code_sizes[1][num_dist_codes - 1]) break;
 
-  memcpy(code_sizes_to_pack, &d->m_huff_code_sizes[0][0], num_lit_codes);
-  memcpy(code_sizes_to_pack + num_lit_codes, &d->m_huff_code_sizes[1][0], num_dist_codes);
+  memcpy(code_sizes_to_pack, &d->m_huff_code_sizes[0][0], sizeof(mz_uint8) * num_lit_codes);
+  memcpy(code_sizes_to_pack + num_lit_codes, &d->m_huff_code_sizes[1][0], sizeof(mz_uint8) * num_dist_codes);
   total_code_sizes_to_pack = num_lit_codes + num_dist_codes; num_packed_code_sizes = 0; rle_z_count = 0; rle_repeat_count = 0;
 
   memset(&d->m_huff_count[2][0], 0, sizeof(d->m_huff_count[2][0]) * TDEFL_MAX_HUFF_SYMBOLS_2);
@@ -3030,6 +3030,9 @@ static MZ_FORCEINLINE mz_bool mz_zip_array_ensure_room(mz_zip_archive *pZip, mz_
 
 static MZ_FORCEINLINE mz_bool mz_zip_array_push_back(mz_zip_archive *pZip, mz_zip_array *pArray, const void *pElements, size_t n)
 {
+  if (0 == n) return MZ_TRUE;
+  if (!pElements) return MZ_FALSE;
+  
   size_t orig_size = pArray->m_size; if (!mz_zip_array_resize(pZip, pArray, orig_size + n, MZ_TRUE)) return MZ_FALSE;
   memcpy((mz_uint8*)pArray->m_p + orig_size * pArray->m_element_size, pElements, n * pArray->m_element_size);
   return MZ_TRUE;
@@ -3803,9 +3806,9 @@ mz_bool mz_zip_reader_extract_to_callback(mz_zip_archive *pZip, mz_uint file_ind
         status = TINFL_STATUS_FAILED;
       else if (!(flags & MZ_ZIP_FLAG_COMPRESSED_DATA))
         file_crc32 = (mz_uint32)mz_crc32(file_crc32, (const mz_uint8 *)pRead_buf, (size_t)file_stat.m_comp_size);
-      cur_file_ofs += file_stat.m_comp_size;
+      // cur_file_ofs += file_stat.m_comp_size;
       out_buf_ofs += file_stat.m_comp_size;
-      comp_remaining = 0;
+      // comp_remaining = 0;
     }
     else
     {
@@ -3936,23 +3939,21 @@ mz_bool mz_zip_reader_end(mz_zip_archive *pZip)
   if ((!pZip) || (!pZip->m_pState) || (!pZip->m_pAlloc) || (!pZip->m_pFree) || (pZip->m_zip_mode != MZ_ZIP_MODE_READING))
     return MZ_FALSE;
 
-  if (pZip->m_pState)
-  {
-    mz_zip_internal_state *pState = pZip->m_pState; pZip->m_pState = NULL;
-    mz_zip_array_clear(pZip, &pState->m_central_dir);
-    mz_zip_array_clear(pZip, &pState->m_central_dir_offsets);
-    mz_zip_array_clear(pZip, &pState->m_sorted_central_dir_offsets);
+  mz_zip_internal_state *pState = pZip->m_pState; pZip->m_pState = NULL;
+  mz_zip_array_clear(pZip, &pState->m_central_dir);
+  mz_zip_array_clear(pZip, &pState->m_central_dir_offsets);
+  mz_zip_array_clear(pZip, &pState->m_sorted_central_dir_offsets);
 
 #ifndef MINIZ_NO_STDIO
-    if (pState->m_pFile)
-    {
-      MZ_FCLOSE(pState->m_pFile);
-      pState->m_pFile = NULL;
-    }
+  if (pState->m_pFile)
+  {
+    MZ_FCLOSE(pState->m_pFile);
+    pState->m_pFile = NULL;
+  }
 #endif // #ifndef MINIZ_NO_STDIO
 
-    pZip->m_pFree(pZip->m_pAlloc_opaque, pState);
-  }
+  pZip->m_pFree(pZip->m_pAlloc_opaque, pState);
+  
   pZip->m_zip_mode = MZ_ZIP_MODE_INVALID;
 
   return MZ_TRUE;
@@ -4012,14 +4013,11 @@ static size_t mz_zip_heap_write_func(void *pOpaque, mz_uint64 file_ofs, const vo
   mz_zip_archive *pZip = (mz_zip_archive *)pOpaque;
   mz_zip_internal_state *pState = pZip->m_pState;
   mz_uint64 new_size = MZ_MAX(file_ofs + n, pState->m_mem_size);
-#ifdef _MSC_VER
-  if ((!n) || ((0, sizeof(size_t) == sizeof(mz_uint32)) && (new_size > 0x7FFFFFFF)))
-#else
+
   if ((!n) || ((sizeof(size_t) == sizeof(mz_uint32)) && (new_size > 0x7FFFFFFF)))
-#endif
     return 0;
-  if (new_size > pState->m_mem_capacity)
-  {
+
+  if (new_size > pState->m_mem_capacity) {
     void *pNew_block;
     size_t new_capacity = MZ_MAX(64, pState->m_mem_capacity); while (new_capacity < new_size) new_capacity *= 2;
     if (NULL == (pNew_block = pZip->m_pRealloc(pZip->m_pAlloc_opaque, pState->m_pMem, 1, new_capacity)))
@@ -4427,14 +4425,14 @@ mz_bool mz_zip_writer_add_file(mz_zip_archive *pZip, const char *pArchive_name, 
   mz_uint8 local_dir_header[MZ_ZIP_LOCAL_DIR_HEADER_SIZE];
   MZ_FILE *pSrc_file = NULL;
 
+  if ((int)level_and_flags < 0)
+    level_and_flags = MZ_DEFAULT_LEVEL;
+  level = level_and_flags & 0xF;
+
   if ((!pZip) || (!pZip->m_pState) || (pZip->m_zip_mode != MZ_ZIP_MODE_WRITING) || (!pArchive_name) || ((comment_size) && (!pComment)) || (level > MZ_UBER_COMPRESSION))
     return MZ_FALSE;
 
   local_dir_header_ofs = cur_archive_file_ofs = pZip->m_archive_size;
-
-  if ((int)level_and_flags < 0)
-    level_and_flags = MZ_DEFAULT_LEVEL;
-  level = level_and_flags & 0xF;
 
   if (level_and_flags & MZ_ZIP_FLAG_COMPRESSED_DATA)
     return MZ_FALSE;
@@ -4684,7 +4682,7 @@ mz_bool mz_zip_writer_add_from_zip_reader(mz_zip_archive *pZip, mz_zip_archive *
       return MZ_FALSE;
     }
 
-    cur_src_file_ofs += n;
+    // cur_src_file_ofs += n;
     cur_dst_file_ofs += n;
   }
   pZip->m_pFree(pZip->m_pAlloc_opaque, pBuf);
